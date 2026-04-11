@@ -45,7 +45,7 @@ if 'finalizado' not in st.session_state:
     st.session_state.finalizado = False
 
 
-# --- CÁLCULO DE OMW% (INTERNO) ---
+# --- CÁLCULO DE OMW% (INTERNO PARA DESEMPATE) ---
 def calcular_omw(nombre):
     datos = st.session_state.jugadores.get(nombre)
     if not datos or not datos["oponentes"] or datos["partidas"] == 0: return 0.0
@@ -81,33 +81,65 @@ def renderizar_mesa_visual(num_mesa, mesa):
                         unsafe_allow_html=True)
             st.markdown(f"<div style='text-align: left;'><b>{j4}</b></div>", unsafe_allow_html=True)
 
-    st.write("Selecciona posiciones finales:")
+    st.write("Asignar resultados individuales:")
+    puntos_dict = {
+        "1° Lugar (4 pts)": 4,
+        "2° Lugar (3 pts)": 3,
+        "3° Lugar (2 pts)": 2,
+        "4° Lugar (1 pt)": 1
+    }
+
+    res_mesa = {}
+    # Usamos el número de jugadores para crear las columnas
     cols = st.columns(len(mesa))
-    res = []
-    for i in range(len(mesa)):
+
+    for i, jugador in enumerate(mesa):
         with cols[i]:
-            sel = st.selectbox(f"{i + 1}° Lugar", [None] + mesa, key=f"m{num_mesa}_{i}_{st.session_state.ronda_actual}")
-            res.append(sel)
-    return res
+            # CAMBIO AQUÍ: Usamos el nombre del jugador en el label para que no haya pérdida
+            pos = st.selectbox(
+                f"Resultado: {jugador}",
+                list(puntos_dict.keys()),
+                key=f"res_{jugador}_{st.session_state.ronda_actual}"
+            )
+            res_mesa[jugador] = puntos_dict[pos]
+    return res_mesa
 
 
-# --- SIDEBAR (MODO Y STANDINGS) ---
+# --- SIDEBAR (CONFIGURACIÓN Y STANDINGS) ---
 with st.sidebar:
     st.title("⚙️ Configuración")
     modo_juego = st.radio("Modo de Emparejamiento", ["Aleatorio", "Suizo"])
 
     st.divider()
     st.subheader("📊 Standings")
+
     if st.session_state.jugadores:
-        datos_tabla = [{"Jugador": k, "Pts": v["puntos"]} for k, v in st.session_state.jugadores.items()]
-        df_realtime = pd.DataFrame(datos_tabla).sort_values(
-            by=["Pts"],
-            key=lambda x: [(st.session_state.jugadores[n]["puntos"], calcular_omw(n)) for n in
-                           st.session_state.jugadores],
-            ascending=False
+        # Definimos la prioridad de ordenamiento:
+        # Si tiene puesto manual (1, 2, 3...), se le asigna un valor muy alto (1000 - puesto)
+        # para que al usar reverse=True quede en el tope.
+        def prioridad_sort(item):
+            nombre, datos = item
+            pos_manual = datos.get("posicion_manual", 0)
+            if pos_manual > 0:
+                return (1000 - pos_manual, 0)  # Prioridad máxima manual
+            # Si no hay manual, usa Puntos y luego OMW%
+            return (datos["puntos"], calcular_omw(nombre))
+
+
+        # Ordenamos a los jugadores
+        jugadores_ordenados = sorted(
+            st.session_state.jugadores.items(),
+            key=prioridad_sort,
+            reverse=True
         )
-        df_realtime.index = range(1, len(df_realtime) + 1)
+
+        # Preparamos los datos para la tabla (mostrando solo lo necesario)
+        datos_tabla = [{"Jugador": k, "Pts": v["puntos"]} for k, v in jugadores_ordenados]
+        df_realtime = pd.DataFrame(datos_tabla)
+        df_realtime.index = range(1, len(df_realtime) + 1)  # Posiciones desde 1
         st.table(df_realtime)
+    else:
+        st.write("Esperando inscripciones...")
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("🏆 MTG Commander Tournament Manager")
@@ -118,32 +150,52 @@ if not st.session_state.finalizado:
     with t1:
         with st.container(border=True):
             c1, c2, c3 = st.columns([1, 1.5, 1])
-            nombre_j = c1.text_input("Nombre del Jugador", key="ins_nom")
-            busq = c2.text_input("Buscar Comandante...", key="ins_busq")
+            nombre_j = c1.text_input("Nombre del Jugador")
+            busq = c2.text_input("Buscar Comandante...")
             opciones = buscar_nombres_sugeridos(busq)
-            carta_sel = c2.selectbox("Selecciona la carta:", opciones if opciones else ["Escribe para buscar..."],
-                                     key="ins_sel")
-            link_m = c3.text_input("Link de Moxfield", key="ins_link")
+            carta_sel = c2.selectbox("Selecciona la carta:", opciones if opciones else ["Escribe para buscar..."])
+            link_m = c3.text_input("Link de Moxfield")
 
             if st.button("➕ Inscribir Jugador", use_container_width=True):
                 if nombre_j and carta_sel not in ["Sin resultados", "Escribe para buscar..."]:
                     datos_c = obtener_datos_carta(carta_sel)
                     if datos_c:
                         st.session_state.jugadores[nombre_j] = {
-                            "puntos": 0, "oponentes": [], "partidas": 0,
-                            "comandante": datos_c["nombre"], "moxfield": link_m, "foto": datos_c["foto"]
+                            "puntos": 0,
+                            "oponentes": [],
+                            "partidas": 0,
+                            "comandante": datos_c["nombre"],
+                            "moxfield": link_m,
+                            "foto": datos_c["foto"],
+                            "posicion_manual": 0
                         }
+                        st.success(f"¡{nombre_j} inscrito!")
                         st.rerun()
 
         st.divider()
         if st.session_state.jugadores:
+            st.subheader(f"👥 Jugadores Inscritos ({len(st.session_state.jugadores)})")
             cols_i = st.columns(4)
-            for idx, (n, d) in enumerate(st.session_state.jugadores.items()):
+            # Creamos una lista de nombres para evitar errores de mutación al borrar
+            nombres_jugadores = list(st.session_state.jugadores.keys())
+
+            for idx, n in enumerate(nombres_jugadores):
+                d = st.session_state.jugadores[n]
                 with cols_i[idx % 4]:
                     with st.container(border=True):
-                        if d["foto"]: st.image(d["foto"], use_container_width=True)
+                        if d["foto"]:
+                            st.image(d["foto"], use_container_width=True)
                         st.write(f"**{n}**")
-                        if d["moxfield"]: st.link_button("📂 Deck", d["moxfield"], use_container_width=True)
+
+                        # Columna para botones de acción
+                        c_deck, c_del = st.columns([3, 1])
+                        if d["moxfield"]:
+                            c_deck.link_button("📂 Deck", d["moxfield"], use_container_width=True)
+
+                        # BOTÓN PARA ELIMINAR JUGADOR
+                        if c_del.button("🗑️", key=f"del_{n}", help=f"Eliminar a {n}"):
+                            del st.session_state.jugadores[n]
+                            st.rerun()  # Recargamos para actualizar la lista y el contador
 
     with t2:
         if len(st.session_state.jugadores) < 3:
@@ -151,111 +203,149 @@ if not st.session_state.finalizado:
         else:
             if st.button("🚀 Lanzar Nueva Ronda"):
                 nombres = list(st.session_state.jugadores.keys())
-
-                # Ordenar para Suizo o Aleatorio
                 if modo_juego == "Suizo" and st.session_state.ronda_actual > 1:
                     nombres.sort(key=lambda x: (st.session_state.jugadores[x]["puntos"], calcular_omw(x)), reverse=True)
                 else:
                     random.shuffle(nombres)
 
-                num_jugadores = len(nombres)
+                num_jug = len(nombres)
                 mesas = []
-
-                # --- LÓGICA DE REPARTO INTELIGENTE ---
-                if num_jugadores == 6:
-                    # Caso específico: 2 mesas de 3
-                    mesas.append(nombres[0:3])
-                    mesas.append(nombres[3:6])
-                elif num_jugadores == 5:
-                    # Caso específico: 1 mesa de 5 (o puedes dividir 3 y 2, pero 2 es poco para EDH)
-                    mesas.append(nombres)
+                # Lógica para 6 jugadores -> 2 mesas de 3
+                if num_jug == 6:
+                    mesas = [nombres[0:3], nombres[3:6]]
                 else:
-                    # Lógica general (Mesas de 4, restos se unen a la última)
-                    for i in range(0, num_jugadores, 4):
+                    for i in range(0, num_jug, 4):
                         grupo = nombres[i:i + 4]
-                        if len(grupo) == 2 and len(mesas) > 0:
-                            mesas[-1].extend(grupo)  # Si sobran 2, se unen a la mesa de 4 (Mesa de 6)
-                        elif len(grupo) == 1 and len(mesas) > 0:
-                            mesas[-1].extend(grupo)  # Si sobra 1, se une (Mesa de 5)
+                        if len(grupo) <= 2 and len(mesas) > 0:
+                            mesas[-1].extend(grupo)
                         else:
                             mesas.append(grupo)
-
                 st.session_state.mesas_activas = mesas
 
             if st.session_state.mesas_activas:
-                with st.form(f"ronda_{st.session_state.ronda_actual}"):
+                with st.form(f"ronda_form_{st.session_state.ronda_actual}"):
                     res_ronda = []
                     for midx, mesa in enumerate(st.session_state.mesas_activas):
-                        podio = renderizar_mesa_visual(midx + 1, mesa)
-                        res_ronda.append({"mesa": mesa, "podio": podio})
+                        puntos_asignados = renderizar_mesa_visual(midx + 1, mesa)
+                        res_ronda.append({"mesa": mesa, "resultados": puntos_asignados})
 
-                    if st.form_submit_button("✅ Guardar Resultados de la Ronda"):
-                        error_encontrado = False
+                    if st.form_submit_button("✅ Guardar Ronda"):
                         for r in res_ronda:
-                            seleccionados = [n for n in r["podio"] if n is not None]
-                            if len(seleccionados) != len(set(seleccionados)) or len(seleccionados) != len(r["mesa"]):
-                                error_encontrado = True
-                                break
+                            for jugador, pts in r["resultados"].items():
+                                st.session_state.jugadores[jugador]["puntos"] += pts
+                                st.session_state.jugadores[jugador]["partidas"] += 1
+                                st.session_state.jugadores[jugador]["oponentes"].extend(
+                                    [o for o in r["mesa"] if o != jugador])
 
-                        if error_encontrado:
-                            st.error("Error: Revisa que todos los puestos estén llenos y no haya repetidos.")
-                        else:
-                            pts_esq = [4, 3, 2, 1]
-                            for r in res_ronda:
-                                for p_m in r["mesa"]:
-                                    st.session_state.jugadores[p_m]["partidas"] += 1
-                                    st.session_state.jugadores[p_m]["oponentes"].extend(
-                                        [o for o in r["mesa"] if o != p_m])
-                                for i, gan in enumerate(r["podio"]):
-                                    if gan: st.session_state.jugadores[gan]["puntos"] += pts_esq[i]
-                            st.session_state.historial.append(res_ronda)
-                            st.session_state.ronda_actual += 1
-                            st.session_state.mesas_activas = None
-                            st.rerun()
+                        st.session_state.historial.append(res_ronda)
+                        st.session_state.ronda_actual += 1
+                        st.session_state.mesas_activas = None
+                        st.rerun()
 
     with t3:
-        st.subheader("Historial Detallado de Rondas")
+        st.subheader("🏆 Ajuste de Ranking Final")
+        st.write("Si el torneo terminó y necesitas ajustar el orden por dados o acuerdo, hazlo aquí:")
+
+        with st.expander("📝 Editar Orden de la Tabla"):
+            with st.form("editor_ranking"):
+                cambios_pos = {}
+                # Mostramos a los jugadores para asignarles su puesto final
+                for nombre, datos in st.session_state.jugadores.items():
+                    col_n, col_p = st.columns([2, 1])
+                    with col_n:
+                        st.write(f"**{nombre}** ({datos['puntos']} pts)")
+                    with col_p:
+                        # Si es 0, el programa usará la lógica normal (Pts > OMW)
+                        nueva_pos = st.number_input(f"Puesto para {nombre}", min_value=0,
+                                                    value=int(datos.get("posicion_manual", 0)), key=f"rank_{nombre}")
+                    cambios_pos[nombre] = nueva_pos
+
+                if st.form_submit_button("💾 Confirmar Posiciones"):
+                    for n, p in cambios_pos.items():
+                        st.session_state.jugadores[n]["posicion_manual"] = p
+                    st.success("¡Ranking ajustado! Revisa el podio al finalizar.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("📜 Historial de Rondas")
         for i, ron in enumerate(st.session_state.historial):
             with st.expander(f"Ronda {i + 1}"):
-                # Crear tabla para el historial de esta ronda
-                datos_historial = []
+                datos_h = []
                 for m_idx, m_data in enumerate(ron):
-                    mesa_str = " | ".join(m_data['mesa'])
-                    posiciones = {}
-                    pts_esq = [4, 3, 2, 1]
-                    for pos_idx, player in enumerate(m_data['podio']):
-                        posiciones[f"{pos_idx + 1}° Lugar"] = f"{player} ({pts_esq[pos_idx]} pts)"
+                    mesa_txt = " | ".join(m_data['mesa'])
+                    fila = {"Mesa": f"Mesa {m_idx + 1}: {mesa_txt}"}
+                    for jug, pts in m_data['resultados'].items():
+                        fila[jug] = f"{pts} pts"
+                    datos_h.append(fila)
+                st.table(pd.DataFrame(datos_h).fillna("-"))
 
-                    fila = {"Mesa": f"Mesa {m_idx + 1}: {mesa_str}"}
-                    fila.update(posiciones)
-                    datos_historial.append(fila)
-
-                st.table(pd.DataFrame(datos_historial))
-
-    if st.button("🏁 FINALIZAR TORNEO"):
+    if st.button("🏁 FINALIZAR"):
         st.session_state.finalizado = True
         st.rerun()
 
 else:
     st.balloons()
-    sorted_players = sorted(st.session_state.jugadores.items(), key=lambda x: (x[1]["puntos"], calcular_omw(x[0])),
-                            reverse=True)
+
+
+    # Lógica de ordenamiento consistente
+    def prioridad_sort(item):
+        nombre, datos = item
+        pos_manual = datos.get("posicion_manual", 0)
+        if pos_manual > 0:
+            return (1000 - pos_manual, 0)
+        return (datos["puntos"], calcular_omw(nombre))
+
+
+    sorted_players = sorted(
+        st.session_state.jugadores.items(),
+        key=prioridad_sort,
+        reverse=True
+    )
+
     top_3 = sorted_players[:3]
     st.markdown("<h1 style='text-align:center;'>🏆 PODIO FINAL</h1>", unsafe_allow_html=True)
-    c_p = st.columns([1, 1.2, 1])
-    for i, label, color in [(1, "🥈 2do Puesto", "#C0C0C0"), (0, "🥇 1er Puesto", "#FFD700"),
-                            (2, "🥉 3er Puesto", "#CD7F32")]:
-        if len(top_3) > i:
-            with c_p[i]:
-                st.markdown(f"<h3 style='text-align:center; color:{color};'>{label}</h3>", unsafe_allow_html=True)
-                st.image(top_3[i][1]["foto"], use_container_width=True)
-                st.markdown(f"<p style='text-align:center;'><b>{top_3[i][0]}</b><br>{top_3[i][1]['comandante']}</p>",
-                            unsafe_allow_html=True)
+
+    # Proporción de columnas: el centro es 1.5 veces más grande
+    cols_podio = st.columns([1, 1.5, 1])
+
+    # --- RENDERIZADO MANUAL POR POSICIÓN ---
+
+    # 🥇 1er PUESTO (CENTRO - Índice 0 de top_3)
+    if len(top_3) >= 1:
+        with cols_podio[1]:
+            nombre, datos = top_3[0]
+            st.markdown("<h2 style='text-align:center; color:#FFD700;'>🥇 1er Puesto</h2>", unsafe_allow_html=True)
+            if datos["foto"]:
+                st.image(datos["foto"], use_container_width=True)
+            st.markdown(f"<p style='text-align:center; font-size:20px;'><b>{nombre}</b><br>{datos['comandante']}</p>",
+                        unsafe_allow_html=True)
+
+    # 🥈 2do PUESTO (IZQUIERDA - Índice 1 de top_3)
+    if len(top_3) >= 2:
+        with cols_podio[0]:
+            nombre, datos = top_3[1]
+            st.markdown("<h3 style='text-align:center; color:#C0C0C0;'>🥈 2do Puesto</h3>", unsafe_allow_html=True)
+            if datos["foto"]:
+                st.image(datos["foto"], use_container_width=True)
+            st.markdown(f"<p style='text-align:center;'><b>{nombre}</b><br>{datos['comandante']}</p>",
+                        unsafe_allow_html=True)
+
+    # 🥉 3er PUESTO (DERECHA - Índice 2 de top_3)
+    if len(top_3) >= 3:
+        with cols_podio[2]:
+            nombre, datos = top_3[2]
+            st.markdown("<h3 style='text-align:center; color:#CD7F32;'>🥉 3er Puesto</h3>", unsafe_allow_html=True)
+            if datos["foto"]:
+                st.image(datos["foto"], use_container_width=True)
+            st.markdown(f"<p style='text-align:center;'><b>{nombre}</b><br>{datos['comandante']}</p>",
+                        unsafe_allow_html=True)
 
     st.divider()
     st.subheader("📊 Clasificación Final")
-    df_f = pd.DataFrame([{"Jugador": n, "Pts": d["puntos"]} for n, d in sorted_players])
-    df_f.index = range(1, len(df_f) + 1)
-    st.table(df_f)
+    df_final = pd.DataFrame([{"Jugador": n, "Pts": d["puntos"]} for n, d in sorted_players])
+    df_final.index = range(1, len(df_final) + 1)
+    st.table(df_final)
 
-    if st.button("🔄 Nuevo Torneo"): st.session_state.clear(); st.rerun()
+    if st.button("🔄 Comenzar Nuevo Torneo", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
