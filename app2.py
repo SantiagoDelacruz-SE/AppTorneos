@@ -2,350 +2,263 @@ import streamlit as st
 import pandas as pd
 import random
 import requests
+import json
+import os
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Commander Tournament Pro", page_icon="🎴", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Commander Tournament Pro", page_icon="🏆", layout="wide")
+
+# Estilos CSS corregidos
+st.markdown("""
+    <style>
+    .podium-card { text-align: center; padding: 15px; border-radius: 15px; background-color: #1E1E1E; border: 2px solid #464855; margin-bottom: 10px; }
+    .gold { border-color: #FFD700; box-shadow: 0px 0px 15px #FFD700; }
+    .silver { border-color: #C0C0C0; box-shadow: 0px 0px 10px #C0C0C0; }
+    .bronze { border-color: #CD7F32; box-shadow: 0px 0px 10px #CD7F32; }
+    .commander-name { color: #888; font-style: italic; font-size: 0.85em; margin-bottom: 5px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+DB_FILE = "torneo_data.json"
 
 
-# --- FUNCIONES DE SCRYFALL ---
+# --- PERSISTENCIA ---
+def guardar_datos():
+    data = {
+        "jugadores": st.session_state.jugadores,
+        "historial": st.session_state.historial,
+        "ronda_actual": st.session_state.ronda_actual,
+        "puntos_config": st.session_state.puntos_config,
+        "finalizado": st.session_state.finalizado,
+        "mesas_activas": st.session_state.mesas_activas
+    }
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def cargar_datos():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            data = json.load(f)
+            for k, v in data.items(): st.session_state[k] = v
+
+
+# --- INICIALIZACIÓN ---
+if 'jugadores' not in st.session_state:
+    st.session_state.update({
+        "jugadores": {}, "historial": [], "ronda_actual": 1,
+        "puntos_config": {"1°": 4, "2°": 3, "3°": 2, "4°": 1},
+        "finalizado": False, "mesas_activas": None
+    })
+    cargar_datos()
+
+
+# --- FUNCIONES ---
+@st.cache_data(ttl=3600)
 def buscar_nombres_sugeridos(query):
     if len(query) < 3: return []
     try:
-        response = requests.get(f"https://api.scryfall.com/cards/autocomplete?q={query}")
-        if response.status_code == 200:
-            return response.json().get('data', [])
+        r = requests.get(f"https://api.scryfall.com/cards/autocomplete?q={query}")
+        return r.json().get('data', [])
     except:
         return []
-    return []
 
 
+@st.cache_data(ttl=3600)
 def obtener_datos_carta(nombre_exacto):
     try:
-        response = requests.get(f"https://api.scryfall.com/cards/named?exact={nombre_exacto}")
-        if response.status_code == 200:
-            data = response.json()
-            img = data['image_uris']['normal'] if 'image_uris' in data else data['card_faces'][0]['image_uris'][
-                'normal']
-            return {"nombre": data['name'], "foto": img}
+        r = requests.get(f"https://api.scryfall.com/cards/named?exact={nombre_exacto}")
+        if r.status_code == 200:
+            d = r.json()
+            img = d['image_uris']['normal'] if 'image_uris' in d else d['card_faces'][0]['image_uris']['normal']
+            return {"nombre": d['name'], "foto": img}
     except:
         return None
-    return None
 
 
-# --- INICIALIZACIÓN DE ESTADO ---
-if 'jugadores' not in st.session_state:
-    st.session_state.jugadores = {}
-if 'historial' not in st.session_state:
-    st.session_state.historial = []
-if 'ronda_actual' not in st.session_state:
-    st.session_state.ronda_actual = 1
-if 'mesas_activas' not in st.session_state:
-    st.session_state.mesas_activas = None
-if 'finalizado' not in st.session_state:
-    st.session_state.finalizado = False
-
-
-# --- CÁLCULO DE OMW% (INTERNO PARA DESEMPATE) ---
 def calcular_omw(nombre):
     datos = st.session_state.jugadores.get(nombre)
-    if not datos or not datos["oponentes"] or datos["partidas"] == 0: return 0.0
+    if not datos or not datos.get("oponentes") or datos["partidas"] == 0: return 0.0
     wrs = []
     for op_n in datos["oponentes"]:
-        op = st.session_state.jugadores[op_n]
-        wr = (op["puntos"] / (op["partidas"] * 4)) if op["partidas"] > 0 else 0
-        wrs.append(max(wr, 0.33))
-    return sum(wrs) / len(wrs)
+        op = st.session_state.jugadores.get(op_n)
+        if op and op.get("partidas", 0) > 0:
+            wrs.append(max(op["puntos"] / (op["partidas"] * 4), 0.33))
+    return sum(wrs) / len(wrs) if wrs else 0.0
 
 
-# --- COMPONENTE MESA (DISEÑO SOLICITADO) ---
-def renderizar_mesa_visual(num_mesa, mesa):
-    st.markdown(f"### 🎴 Mesa {num_mesa}")
-    j1_inicia = mesa[0]
-    j2 = mesa[1] if len(mesa) > 1 else "-"
-    j3 = mesa[2] if len(mesa) > 2 else "-"
-    j4 = mesa[3] if len(mesa) > 3 else "-"
-
-    with st.container(border=True):
-        col_izq, col_mtg, col_der = st.columns([2, 1, 2])
-        with col_izq:
-            st.markdown(f"<div style='text-align: right; margin-bottom: 20px;'><b>{j2}</b></div>",
-                        unsafe_allow_html=True)
-            st.markdown(f"<div style='text-align: right; color: #00CC66;'><b>Inicia: {j1_inicia}</b></div>",
-                        unsafe_allow_html=True)
-        with col_mtg:
-            st.markdown(
-                '<div style="height: 100px; border: 2px solid white; border-radius: 10px; display: flex; align-items: center; justify-content: center; background-color: #1e1e1e; margin: auto; width: 50px;"><b style="color: white; font-size: 10px;">MTG</b></div>',
-                unsafe_allow_html=True)
-        with col_der:
-            st.markdown(f"<div style='text-align: left; margin-bottom: 20px;'><b>{j3}</b></div>",
-                        unsafe_allow_html=True)
-            st.markdown(f"<div style='text-align: left;'><b>{j4}</b></div>", unsafe_allow_html=True)
-
-    st.write("Asignar resultados individuales:")
-    puntos_dict = {
-        "1° Lugar (4 pts)": 4,
-        "2° Lugar (3 pts)": 3,
-        "3° Lugar (2 pts)": 2,
-        "4° Lugar (1 pt)": 1
-    }
-
-    res_mesa = {}
-    # Usamos el número de jugadores para crear las columnas
-    cols = st.columns(len(mesa))
-
-    for i, jugador in enumerate(mesa):
-        with cols[i]:
-            # CAMBIO AQUÍ: Usamos el nombre del jugador en el label para que no haya pérdida
-            pos = st.selectbox(
-                f"Resultado: {jugador}",
-                list(puntos_dict.keys()),
-                key=f"res_{jugador}_{st.session_state.ronda_actual}"
-            )
-            res_mesa[jugador] = puntos_dict[pos]
-    return res_mesa
-
-
-# --- SIDEBAR (CONFIGURACIÓN Y STANDINGS) ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.title("⚙️ Configuración")
-    modo_juego = st.radio("Modo de Emparejamiento", ["Aleatorio", "Suizo"])
+    st.title("🛡️ Administración")
+    es_admin = st.toggle("Modo Administrador", value=False)
+
+    if es_admin:
+        st.subheader("Configuración Global")
+        for k in ["1°", "2°", "3°", "4°"]:
+            st.session_state.puntos_config[k] = st.number_input(f"Pts {k}", value=st.session_state.puntos_config[k],
+                                                                key=f"cfg_{k}")
+
+        if st.button("🗑️ Resetear Torneo"):
+            if os.path.exists(DB_FILE): os.remove(DB_FILE)
+            st.session_state.clear()
+            st.rerun()
 
     st.divider()
     st.subheader("📊 Standings")
-
-    if st.session_state.jugadores:
-        # Definimos la prioridad de ordenamiento:
-        # Si tiene puesto manual (1, 2, 3...), se le asigna un valor muy alto (1000 - puesto)
-        # para que al usar reverse=True quede en el tope.
-        def prioridad_sort(item):
-            nombre, datos = item
-            pos_manual = datos.get("posicion_manual", 0)
-            if pos_manual > 0:
-                return (1000 - pos_manual, 0)  # Prioridad máxima manual
-            # Si no hay manual, usa Puntos y luego OMW%
-            return (datos["puntos"], calcular_omw(nombre))
-
-
-        # Ordenamos a los jugadores
-        jugadores_ordenados = sorted(
-            st.session_state.jugadores.items(),
-            key=prioridad_sort,
-            reverse=True
-        )
-
-        # Preparamos los datos para la tabla (mostrando solo lo necesario)
-        datos_tabla = [{"Jugador": k, "Pts": v["puntos"]} for k, v in jugadores_ordenados]
-        df_realtime = pd.DataFrame(datos_tabla)
-        df_realtime.index = range(1, len(df_realtime) + 1)  # Posiciones desde 1
-        st.table(df_realtime)
-    else:
-        st.write("Esperando inscripciones...")
-
-# --- INTERFAZ PRINCIPAL ---
-st.title("🏆 MTG Commander Tournament Manager")
-
-if not st.session_state.finalizado:
-    t1, t2, t3 = st.tabs(["📝 Inscripción", "⚔️ Rondas", "📜 Historial"])
-
-    with t1:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([1, 1.5, 1])
-            nombre_j = c1.text_input("Nombre del Jugador")
-            busq = c2.text_input("Buscar Comandante...")
-            opciones = buscar_nombres_sugeridos(busq)
-            carta_sel = c2.selectbox("Selecciona la carta:", opciones if opciones else ["Escribe para buscar..."])
-            link_m = c3.text_input("Link de Moxfield")
-
-            if st.button("➕ Inscribir Jugador", use_container_width=True):
-                if nombre_j and carta_sel not in ["Sin resultados", "Escribe para buscar..."]:
-                    datos_c = obtener_datos_carta(carta_sel)
-                    if datos_c:
-                        st.session_state.jugadores[nombre_j] = {
-                            "puntos": 0,
-                            "oponentes": [],
-                            "partidas": 0,
-                            "comandante": datos_c["nombre"],
-                            "moxfield": link_m,
-                            "foto": datos_c["foto"],
-                            "posicion_manual": 0
-                        }
-                        st.success(f"¡{nombre_j} inscrito!")
-                        st.rerun()
-
-        st.divider()
-        if st.session_state.jugadores:
-            st.subheader(f"👥 Jugadores Inscritos ({len(st.session_state.jugadores)})")
-            cols_i = st.columns(4)
-            # Creamos una lista de nombres para evitar errores de mutación al borrar
-            nombres_jugadores = list(st.session_state.jugadores.keys())
-
-            for idx, n in enumerate(nombres_jugadores):
-                d = st.session_state.jugadores[n]
-                with cols_i[idx % 4]:
-                    with st.container(border=True):
-                        if d["foto"]:
-                            st.image(d["foto"], use_container_width=True)
-                        st.write(f"**{n}**")
-
-                        # Columna para botones de acción
-                        c_deck, c_del = st.columns([3, 1])
-                        if d["moxfield"]:
-                            c_deck.link_button("📂 Deck", d["moxfield"], use_container_width=True)
-
-                        # BOTÓN PARA ELIMINAR JUGADOR
-                        if c_del.button("🗑️", key=f"del_{n}", help=f"Eliminar a {n}"):
-                            del st.session_state.jugadores[n]
-                            st.rerun()  # Recargamos para actualizar la lista y el contador
-
-    with t2:
-        if len(st.session_state.jugadores) < 3:
-            st.info("Inscribe jugadores.")
-        else:
-            if st.button("🚀 Lanzar Nueva Ronda"):
-                nombres = list(st.session_state.jugadores.keys())
-                if modo_juego == "Suizo" and st.session_state.ronda_actual > 1:
-                    nombres.sort(key=lambda x: (st.session_state.jugadores[x]["puntos"], calcular_omw(x)), reverse=True)
-                else:
-                    random.shuffle(nombres)
-
-                num_jug = len(nombres)
-                mesas = []
-                # Lógica para 6 jugadores -> 2 mesas de 3
-                if num_jug == 6:
-                    mesas = [nombres[0:3], nombres[3:6]]
-                else:
-                    for i in range(0, num_jug, 4):
-                        grupo = nombres[i:i + 4]
-                        if len(grupo) <= 2 and len(mesas) > 0:
-                            mesas[-1].extend(grupo)
-                        else:
-                            mesas.append(grupo)
-                st.session_state.mesas_activas = mesas
-
-            if st.session_state.mesas_activas:
-                with st.form(f"ronda_form_{st.session_state.ronda_actual}"):
-                    res_ronda = []
-                    for midx, mesa in enumerate(st.session_state.mesas_activas):
-                        puntos_asignados = renderizar_mesa_visual(midx + 1, mesa)
-                        res_ronda.append({"mesa": mesa, "resultados": puntos_asignados})
-
-                    if st.form_submit_button("✅ Guardar Ronda"):
-                        for r in res_ronda:
-                            for jugador, pts in r["resultados"].items():
-                                st.session_state.jugadores[jugador]["puntos"] += pts
-                                st.session_state.jugadores[jugador]["partidas"] += 1
-                                st.session_state.jugadores[jugador]["oponentes"].extend(
-                                    [o for o in r["mesa"] if o != jugador])
-
-                        st.session_state.historial.append(res_ronda)
-                        st.session_state.ronda_actual += 1
-                        st.session_state.mesas_activas = None
-                        st.rerun()
-
-    with t3:
-        st.subheader("🏆 Ajuste de Ranking Final")
-        st.write("Si el torneo terminó y necesitas ajustar el orden por dados o acuerdo, hazlo aquí:")
-
-        with st.expander("📝 Editar Orden de la Tabla"):
-            with st.form("editor_ranking"):
-                cambios_pos = {}
-                # Mostramos a los jugadores para asignarles su puesto final
-                for nombre, datos in st.session_state.jugadores.items():
-                    col_n, col_p = st.columns([2, 1])
-                    with col_n:
-                        st.write(f"**{nombre}** ({datos['puntos']} pts)")
-                    with col_p:
-                        # Si es 0, el programa usará la lógica normal (Pts > OMW)
-                        nueva_pos = st.number_input(f"Puesto para {nombre}", min_value=0,
-                                                    value=int(datos.get("posicion_manual", 0)), key=f"rank_{nombre}")
-                    cambios_pos[nombre] = nueva_pos
-
-                if st.form_submit_button("💾 Confirmar Posiciones"):
-                    for n, p in cambios_pos.items():
-                        st.session_state.jugadores[n]["posicion_manual"] = p
-                    st.success("¡Ranking ajustado! Revisa el podio al finalizar.")
-                    st.rerun()
-
-        st.divider()
-        st.subheader("📜 Historial de Rondas")
-        for i, ron in enumerate(st.session_state.historial):
-            with st.expander(f"Ronda {i + 1}"):
-                datos_h = []
-                for m_idx, m_data in enumerate(ron):
-                    mesa_txt = " | ".join(m_data['mesa'])
-                    fila = {"Mesa": f"Mesa {m_idx + 1}: {mesa_txt}"}
-                    for jug, pts in m_data['resultados'].items():
-                        fila[jug] = f"{pts} pts"
-                    datos_h.append(fila)
-                st.table(pd.DataFrame(datos_h).fillna("-"))
-
-    if st.button("🏁 FINALIZAR"):
-        st.session_state.finalizado = True
-        st.rerun()
-
-else:
-    st.balloons()
-
-
-    # Lógica de ordenamiento consistente
-    def prioridad_sort(item):
-        nombre, datos = item
-        pos_manual = datos.get("posicion_manual", 0)
-        if pos_manual > 0:
-            return (1000 - pos_manual, 0)
-        return (datos["puntos"], calcular_omw(nombre))
-
-
-    sorted_players = sorted(
+    # Ordenamiento Robusto: Puntos > OMW > Nombre
+    jug_sort = sorted(
         st.session_state.jugadores.items(),
-        key=prioridad_sort,
+        key=lambda x: (x[1]["puntos"], calcular_omw(x[0]), x[0]),
         reverse=True
     )
+    for i, (n, d) in enumerate(jug_sort):
+        st.write(f"{i + 1}. **{n}**: {d['puntos']} pts")
 
-    top_3 = sorted_players[:3]
-    st.markdown("<h1 style='text-align:center;'>🏆 PODIO FINAL</h1>", unsafe_allow_html=True)
+# --- INTERFAZ PRINCIPAL ---
+if not st.session_state.finalizado:
+    t1, t2, t3 = st.tabs(["👥 Jugadores", "⚔️ Mesas", "📜 Historial"])
 
-    # Proporción de columnas: el centro es 1.5 veces más grande
-    cols_podio = st.columns([1, 1.5, 1])
+    with t1:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.subheader("Inscripción")
+            n_j = st.text_input("Nombre del Jugador")
+            b_c = st.text_input("Comandante")
+            opc = buscar_nombres_sugeridos(b_c)
+            c_s = st.selectbox("Carta Scryfall", opc if opc else ["..."])
+            if st.button("Añadir") and n_j:
+                dat = obtener_datos_carta(c_s)
+                if dat:
+                    st.session_state.jugadores[n_j] = {
+                        "puntos": 0, "comandante": dat["nombre"], "foto": dat["foto"],
+                        "oponentes": [], "partidas": 0
+                    }
+                    guardar_datos();
+                    st.rerun()
 
-    # --- RENDERIZADO MANUAL POR POSICIÓN ---
+        with c2:
+            st.subheader(f"Jugadores ({len(st.session_state.jugadores)})")
+            cols = st.columns(2)
+            for i, (n, d) in enumerate(st.session_state.jugadores.items()):
+                with cols[i % 2].container(border=True):
+                    sc1, sc2 = st.columns([1, 2])
+                    sc1.image(d["foto"])
+                    sc2.write(f"**{n}**")
+                    if es_admin:
+                        st.session_state.jugadores[n]["puntos"] = sc2.number_input(f"Pts {n}", value=d["puntos"],
+                                                                                   key=f"m_pts_{n}")
+                    else:
+                        sc2.write(f"Pts: {d['puntos']}")
+                    if st.button("Borrar", key=f"del_{n}"):
+                        del st.session_state.jugadores[n]
+                        guardar_datos();
+                        st.rerun()
+            if es_admin: st.button("💾 Guardar Standings Manuales", on_click=guardar_datos)
 
-    # 🥇 1er PUESTO (CENTRO - Índice 0 de top_3)
-    if len(top_3) >= 1:
-        with cols_podio[1]:
-            nombre, datos = top_3[0]
-            st.markdown("<h2 style='text-align:center; color:#FFD700;'>🥇 1er Puesto</h2>", unsafe_allow_html=True)
-            if datos["foto"]:
-                st.image(datos["foto"], use_container_width=True)
-            st.markdown(f"<p style='text-align:center; font-size:20px;'><b>{nombre}</b><br>{datos['comandante']}</p>",
-                        unsafe_allow_html=True)
+    with t2:
+        st.subheader("Gestión de Mesas")
+        col_m1, col_m2 = st.columns(2)
+        modo_emp = col_m1.selectbox("Emparejamiento", ["Aleatorio", "Suizo"])
 
-    # 🥈 2do PUESTO (IZQUIERDA - Índice 1 de top_3)
-    if len(top_3) >= 2:
-        with cols_podio[0]:
-            nombre, datos = top_3[1]
-            st.markdown("<h3 style='text-align:center; color:#C0C0C0;'>🥈 2do Puesto</h3>", unsafe_allow_html=True)
-            if datos["foto"]:
-                st.image(datos["foto"], use_container_width=True)
-            st.markdown(f"<p style='text-align:center;'><b>{nombre}</b><br>{datos['comandante']}</p>",
-                        unsafe_allow_html=True)
+        if col_m2.button("🎲 Generar / Resetear Mesas"):
+            nombres = list(st.session_state.jugadores.keys())
+            if modo_emp == "Suizo":
+                nombres.sort(key=lambda x: (st.session_state.jugadores[x]["puntos"], calcular_omw(x)), reverse=True)
+            else:
+                random.shuffle(nombres)
+            st.session_state.mesas_activas = [nombres[i:i + 4] for i in range(0, len(nombres), 4)]
+            guardar_datos()
 
-    # 🥉 3er PUESTO (DERECHA - Índice 2 de top_3)
-    if len(top_3) >= 3:
-        with cols_podio[2]:
-            nombre, datos = top_3[2]
-            st.markdown("<h3 style='text-align:center; color:#CD7F32;'>🥉 3er Puesto</h3>", unsafe_allow_html=True)
-            if datos["foto"]:
-                st.image(datos["foto"], use_container_width=True)
-            st.markdown(f"<p style='text-align:center;'><b>{nombre}</b><br>{datos['comandante']}</p>",
-                        unsafe_allow_html=True)
+        if st.session_state.mesas_activas:
+            # EDICIÓN DE MESAS (Solo Admin)
+            if es_admin:
+                with st.expander("🛠️ Editar Mesas Manualmente", expanded=True):
+                    for idx, mesa in enumerate(st.session_state.mesas_activas):
+                        st.session_state.mesas_activas[idx] = st.multiselect(
+                            f"Mesa {idx + 1}", options=list(st.session_state.jugadores.keys()),
+                            default=mesa, key=f"edit_m_{idx}"
+                        )
+                    if st.button("Añadir Mesa Vacía"):
+                        st.session_state.mesas_activas.append([])
+                        st.rerun()
 
-    st.divider()
-    st.subheader("📊 Clasificación Final")
-    df_final = pd.DataFrame([{"Jugador": n, "Pts": d["puntos"]} for n, d in sorted_players])
-    df_final.index = range(1, len(df_final) + 1)
-    st.table(df_final)
+            with st.form("ronda_form"):
+                st.subheader(f"Resultados Ronda {st.session_state.ronda_actual}")
+                ronda_results = []
+                for idx, mesa in enumerate(st.session_state.mesas_activas):
+                    if not mesa: continue
+                    st.markdown(f"**Mesa {idx + 1}**")
+                    m_cols = st.columns(len(mesa))
+                    res_m = {}
+                    for i, j in enumerate(mesa):
+                        with m_cols[i]:
+                            st.caption(j)
+                            res_m[j] = st.selectbox("Posición", [1, 2, 3, 4], key=f"r_{idx}_{j}")
+                    ronda_results.append({"mesa": mesa, "posiciones": res_m})
 
-    if st.button("🔄 Comenzar Nuevo Torneo", use_container_width=True):
+                if st.form_submit_button("✅ Finalizar y Sumar Puntos"):
+                    for m in ronda_results:
+                        for jug, pos in m["posiciones"].items():
+                            st.session_state.jugadores[jug]["puntos"] += st.session_state.puntos_config[f"{pos}°"]
+                            st.session_state.jugadores[jug]["partidas"] += 1
+                            st.session_state.jugadores[jug]["oponentes"].extend([o for o in m["mesa"] if o != jug])
+                    st.session_state.historial.append(ronda_results)
+                    st.session_state.ronda_actual += 1
+                    st.session_state.mesas_activas = None
+                    guardar_datos();
+                    st.rerun()
+
+    with t3:
+        st.subheader("Historial")
+        for i, ronda in enumerate(st.session_state.historial):
+            with st.expander(f"Ronda {i + 1}"):
+                h_table = []
+                for m_idx, m_data in enumerate(ronda):
+                    for jug, pos in m_data["posiciones"].items():
+                        h_table.append({"Mesa": m_idx + 1, "Jugador": jug, "Lugar": f"{pos}°",
+                                        "Pts+": st.session_state.puntos_config[f"{pos}°"]})
+                st.table(h_table)
+
+        st.divider()
+        if st.button("🏁 FINALIZAR TODO EL TORNEO", type="primary", use_container_width=True):
+            st.session_state.finalizado = True
+            guardar_datos();
+            st.rerun()
+
+else:
+    # --- PODIO FINAL ---
+    st.balloons()
+    st.markdown("<h1 style='text-align:center;'>🏆 RESULTADOS FINALES</h1>", unsafe_allow_html=True)
+
+    top_3 = sorted(
+        st.session_state.jugadores.items(),
+        key=lambda x: (x[1]["puntos"], calcular_omw(x[0]), x[0]),
+        reverse=True
+    )[:3]
+
+    c1, c2, c3 = st.columns(3)
+    pos_data = [
+        {"col": c2, "idx": 0, "label": "🥇 1er Puesto", "style": "gold"},
+        {"col": c1, "idx": 1, "label": "🥈 2do Puesto", "style": "silver"},
+        {"col": c3, "idx": 2, "label": "🥉 3er Puesto", "style": "bronze"}
+    ]
+
+    for p in pos_data:
+        if len(top_3) > p["idx"]:
+            n, d = top_3[p["idx"]]
+            with p["col"]:
+                st.markdown(f"""
+                    <div class='podium-card {p['style']}'>
+                        <h2>{p['label']}</h2>
+                        <img src='{d['foto']}' style='width:100%; border-radius:10px;'>
+                        <h3 style='margin-bottom:0;'>{n}</h3>
+                        <div class='commander-name'>{d['comandante']}</div>
+                        <h2 style='color:#00CC66; margin-top:5px;'>{d['puntos']} Pts</h2>
+                    </div>
+                """, unsafe_allow_html=True)
+
+    if st.button("🔄 Nuevo Torneo"):
+        if os.remove(DB_FILE): pass
         st.session_state.clear()
         st.rerun()
+        
